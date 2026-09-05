@@ -1,0 +1,42 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_20-4859b81c7f691c48f1505eac0ff66519a6d63ecd",
+  "solcVersion": "0.8.20",
+  "solcLongVersion": "0.8.20+commit.a1b79de6",
+  "compilerType": "solc",
+  "userSourceNameMap": {
+    "contracts/FaceVerification.sol": "project/contracts/FaceVerification.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "shanghai",
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode.linkReferences",
+            "evm.bytecode.object",
+            "evm.bytecode.opcodes",
+            "evm.bytecode.sourceMap",
+            "evm.deployedBytecode.immutableReferences",
+            "evm.deployedBytecode.linkReferences",
+            "evm.deployedBytecode.object",
+            "evm.deployedBytecode.opcodes",
+            "evm.deployedBytecode.sourceMap",
+            "evm.methodIdentifiers"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/FaceVerification.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n\n/**\n * @title FaceVerification\n * @dev Smart Contract for registering and verifying SHA-256 metadata integrity fingerprints.\n * \n * PURPOSE & INTENT:\n * - This contract registers and verifies 32-byte (bytes32) SHA-256 metadata integrity fingerprints\n *   produced by canonicalizing external visual-search candidate results.\n * - PRIVACY & SECURITY BOUNDS:\n *   - No raw face images are stored or processed on-chain.\n *   - No face embeddings or biometric vectors are stored on-chain.\n *   - No API keys, private keys, passwords, or secrets are stored.\n *   - No personal identity data or identity claims are encoded into this contract.\n * - DISCLAIMER:\n *   - The registered SHA-256 fingerprint represents external metadata integrity only.\n *   - The blockchain record is NOT proof of human identity.\n */\ncontract FaceVerification {\n\n    /// @dev Structure representing an on-chain metadata integrity record.\n    struct Record {\n        bytes32 dataHash;\n        address registeredBy;\n        uint256 timestamp;\n        bool exists;\n    }\n\n    /// @dev Internal mapping from 32-byte SHA-256 digest to Record.\n    mapping(bytes32 => Record) private records;\n\n    /// @dev Event emitted whenever a new SHA-256 metadata fingerprint is registered.\n    event HashRegistered(\n        bytes32 indexed dataHash,\n        address indexed registeredBy,\n        uint256 timestamp\n    );\n\n    /**\n     * @dev Register a 32-byte SHA-256 metadata fingerprint on-chain.\n     * @param dataHash 32-byte SHA-256 digest of the canonical external result metadata.\n     */\n    function registerHash(bytes32 dataHash) public {\n        require(\n            dataHash != bytes32(0),\n            \"FaceVerification: Zero hash rejected\"\n        );\n\n        require(\n            !records[dataHash].exists,\n            \"FaceVerification: Hash already registered\"\n        );\n\n        records[dataHash] = Record({\n            dataHash: dataHash,\n            registeredBy: msg.sender,\n            timestamp: block.timestamp,\n            exists: true\n        });\n\n        emit HashRegistered(\n            dataHash,\n            msg.sender,\n            block.timestamp\n        );\n    }\n\n    /**\n     * @dev Verify whether a given SHA-256 metadata fingerprint has been registered on-chain.\n     * @param dataHash 32-byte SHA-256 digest to verify.\n     * @return True if the hash exists on-chain, false otherwise.\n     */\n    function verifyHash(bytes32 dataHash) public view returns (bool) {\n        return records[dataHash].exists;\n    }\n\n    /**\n     * @dev Retrieve the stored record metadata for a registered SHA-256 fingerprint.\n     * @param dataHash 32-byte SHA-256 digest to query.\n     * @return dataHash The 32-byte SHA-256 digest.\n     * @return registeredBy Address that registered the hash.\n     * @return timestamp Block timestamp when registered.\n     * @return exists Boolean flag indicating if record exists on-chain.\n     */\n    function getRecord(bytes32 dataHash)\n        public\n        view\n        returns (\n            bytes32,\n            address,\n            uint256,\n            bool\n        )\n    {\n        Record memory record = records[dataHash];\n        return (\n            record.dataHash,\n            record.registeredBy,\n            record.timestamp,\n            record.exists\n        );\n    }\n}\n"
+      }
+    }
+  }
+}
