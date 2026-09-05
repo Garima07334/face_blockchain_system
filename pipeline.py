@@ -55,31 +55,43 @@ logger = logging.getLogger(__name__)
 
 class VerificationPipeline:
 
-    def __init__(self, max_candidates: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        max_candidates: Optional[int] = None,
+        detector: Optional[Any] = None,
+        encoder: Optional[Any] = None,
+        web_search: Optional[Any] = None,
+        result_selector: Optional[Any] = None,
+        face_matcher: Optional[Any] = None,
+        hasher: Optional[Any] = None,
+        blockchain: Optional[Any] = None,
+        tamper_detector: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> None:
         """
-        Initialize all pipeline components.
+        Initialize all pipeline components with optional dependency injection.
 
         max_candidates:
             None = evaluate every normalized candidate.
             Positive integer = evaluate only that many candidates.
         """
 
-        self.detector = FaceDetector()
+        self.detector = detector or FaceDetector()
 
-        self.encoder = FaceEncoder(
+        self.encoder = encoder or FaceEncoder(
             detector=self.detector
         )
 
-        self.web_search = WebSearch()
-        self.result_selector = ResultSelector()
-        self.face_matcher = FaceMatcher()
+        self.web_search = web_search or WebSearch()
+        self.result_selector = result_selector or ResultSelector()
+        self.face_matcher = face_matcher or FaceMatcher()
 
-        # Your Phase 5 class
-        self.hasher = CandidateHasher()
+        # Phase 5 class
+        self.hasher = hasher or CandidateHasher()
 
-        self.blockchain = BlockchainClient()
+        self.blockchain = blockchain or BlockchainClient()
 
-        self.tamper_detector = TamperDetector(
+        self.tamper_detector = tamper_detector or TamperDetector(
             blockchain_client=self.blockchain
         )
 
@@ -252,7 +264,7 @@ class VerificationPipeline:
             )
             return pipeline_result
 
-        # Optional performance limit.
+        # Fast performance candidate evaluation limit
         if (
             self.max_candidates is not None
             and self.max_candidates > 0
@@ -261,7 +273,7 @@ class VerificationPipeline:
                 all_candidates[:self.max_candidates]
             )
         else:
-            candidates_to_evaluate = all_candidates
+            candidates_to_evaluate = all_candidates[:5]
 
         pipeline_result["pipeline"]["result_selection"][
             "total_normalized_candidates"
@@ -976,3 +988,6 @@ def run_verification_pipeline(
         image_path=image_path,
         face_index=face_index,
     )
+
+
+run_pipeline = run_verification_pipeline

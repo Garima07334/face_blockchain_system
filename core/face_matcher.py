@@ -336,6 +336,24 @@ class FaceMatcher:
 
         url_str = str(url).strip()
 
+        # Direct local file handling
+        if os.path.exists(url_str) and os.path.isfile(url_str):
+            img = cv2.imread(url_str)
+            if img is not None:
+                h, w = img.shape[:2]
+                with open(url_str, "rb") as f:
+                    data = f.read()
+                return {
+                    "success": True,
+                    "temp_path": Path(url_str),
+                    "image_bytes": data,
+                    "image_size": {
+                        "width": w,
+                        "height": h,
+                    },
+                    "error": None,
+                }
+
         try:
             parsed = urlparse(url_str)
         except Exception:

@@ -136,6 +136,41 @@ class TamperDetector:
                 "error": None,
             }
 
+    def verify_hash(self, hash_hex: str) -> Dict[str, Any]:
+        """Verify whether a SHA-256 hash exists on-chain and return TamperDetector status."""
+        verify_res = self.blockchain_client.verify_hash(hash_hex)
+        is_verified = verify_res.get("verified", False)
+        
+        if is_verified:
+            record_res = self.blockchain_client.get_record(hash_hex)
+            record_data = None
+            if record_res.get("success", False) and record_res.get("exists", False):
+                record_data = {
+                    "data_hash": record_res.get("hash"),
+                    "registered_by": record_res.get("registered_by"),
+                    "timestamp": record_res.get("timestamp"),
+                    "exists": True,
+                }
+            return {
+                "success": True,
+                "status": self.STATUS_VERIFIED,
+                "current_hash": hash_hex,
+                "blockchain_verified": True,
+                "record": record_data,
+                "tampered": False,
+                "error": None,
+            }
+        else:
+            return {
+                "success": True,
+                "status": self.STATUS_TAMPER_DETECTED,
+                "current_hash": hash_hex,
+                "blockchain_verified": False,
+                "record": None,
+                "tampered": True,
+                "error": None,
+            }
+
 
 def verify_candidate_integrity(
     candidate: Any,

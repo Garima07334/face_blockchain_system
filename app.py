@@ -448,6 +448,7 @@ def main():
         input_mode = st.radio(
             "Input Source",
             [
+                "Live Webcam Snapshot",
                 "Upload Image",
                 "Select Real Sample Image",
             ],
@@ -458,10 +459,22 @@ def main():
         temp_file = None
 
         # ---------------------------------------------------------------
+        # LIVE WEBCAM
+        # ---------------------------------------------------------------
+
+        if input_mode == "Live Webcam Snapshot":
+            cam_pic = st.camera_input("Capture a face snapshot")
+            if cam_pic:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as file:
+                    file.write(cam_pic.getvalue())
+                    selected_image_path = Path(file.name)
+                    temp_file = selected_image_path
+
+        # ---------------------------------------------------------------
         # UPLOAD
         # ---------------------------------------------------------------
 
-        if input_mode == "Upload Image":
+        elif input_mode == "Upload Image":
 
             uploaded_file = st.file_uploader(
                 "Upload a face photo",
