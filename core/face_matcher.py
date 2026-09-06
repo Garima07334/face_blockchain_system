@@ -1,20 +1,2089 @@
-"""
-Phase 10.5 / Phase 11: Candidate Face Matcher.
+# # """
+# # Phase 10.5 / Phase 11: Candidate Face Matcher.
 
-Verifies whether an external candidate image contains a face that
-matches the query face embedding using OpenCV SFace cosine similarity.
+# # Verifies whether an external candidate image contains a face that
+# # matches the query face embedding using OpenCV SFace cosine similarity.
 
-Important:
-- External web search is candidate discovery only.
-- A candidate is accepted only after SFace verification.
-- Blockchain registration must never happen without a valid face match.
-- No face image or biometric embedding is stored on-chain.
+# # Important:
+# # - External web search is candidate discovery only.
+# # - A candidate is accepted only after SFace verification.
+# # - Blockchain registration must never happen without a valid face match.
+# # - No face image or biometric embedding is stored on-chain.
+# # """
+
+# # from pathlib import Path
+# # from typing import Any, Dict, List, Optional, Tuple, Union
+# # import os
+# # import tempfile
+# # from urllib.parse import urlparse
+
+# # import cv2
+# # import numpy as np
+# # import requests
+# # from dotenv import load_dotenv
+
+# # from core.face_detector import FaceDetector
+# # from core.face_encoder import FaceEncoder
+
+
+# # load_dotenv()
+
+
+# # # ---------------------------------------------------------------------------
+# # # Configuration
+# # # ---------------------------------------------------------------------------
+
+# # DEFAULT_SFACE_COSINE_THRESHOLD = 0.363
+
+
+# # class FaceMatcher:
+# #     """Verify external candidate faces using OpenCV SFace."""
+
+# #     STATUS_MATCH = "MATCH"
+# #     STATUS_NO_MATCH = "NO_MATCH"
+# #     STATUS_VERIFICATION_ERROR = "VERIFICATION_ERROR"
+
+# #     def __init__(
+# #         self,
+# #         threshold: Optional[float] = None,
+# #         detector: Optional[FaceDetector] = None,
+# #         encoder: Optional[FaceEncoder] = None,
+# #         timeout: int = 10,
+# #         max_download_size_bytes: int = 5 * 1024 * 1024,
+# #     ) -> None:
+
+# #         # ================================================================
+# #         # THRESHOLD
+# #         # ================================================================
+
+# #         if threshold is not None:
+# #             self.threshold = float(threshold)
+
+# #         else:
+# #             env_value = os.getenv("FACE_MATCH_THRESHOLD")
+
+# #             self.threshold = (
+# #                 float(env_value)
+# #                 if env_value
+# #                 else DEFAULT_SFACE_COSINE_THRESHOLD
+# #             )
+
+# #         if not 0.0 <= self.threshold <= 1.0:
+# #             raise ValueError(
+# #                 "Face match threshold must be between 0.0 and 1.0."
+# #             )
+
+# #         # ================================================================
+# #         # MODELS
+# #         # ================================================================
+
+# #         self.detector = detector or FaceDetector()
+
+# #         # More tolerant detector for small thumbnails.
+# #         self.small_detector = FaceDetector(
+# #             min_size=(15, 15)
+# #         )
+
+# #         self.encoder = encoder or FaceEncoder(
+# #             detector=self.detector
+# #         )
+
+# #         self.small_encoder = FaceEncoder(
+# #             detector=self.small_detector
+# #         )
+
+# #         self.timeout = timeout
+
+# #         self.max_download_size_bytes = (
+# #             max_download_size_bytes
+# #         )
+
+# #     # ====================================================================
+# #     # COSINE SIMILARITY
+# #     # ====================================================================
+
+# #     @staticmethod
+# #     def compute_similarity(
+# #         embedding1: List[float],
+# #         embedding2: List[float],
+# #     ) -> Tuple[float, float]:
+# #         """
+# #         Calculate cosine similarity and cosine distance.
+
+# #         Returns:
+# #             similarity, distance
+# #         """
+
+# #         if not embedding1 or not embedding2:
+# #             return 0.0, 1.0
+
+# #         try:
+# #             v1 = np.asarray(
+# #                 embedding1,
+# #                 dtype=np.float32,
+# #             ).flatten()
+
+# #             v2 = np.asarray(
+# #                 embedding2,
+# #                 dtype=np.float32,
+# #             ).flatten()
+
+# #         except Exception:
+# #             return 0.0, 1.0
+
+# #         if v1.size == 0 or v2.size == 0:
+# #             return 0.0, 1.0
+
+# #         if v1.size != v2.size:
+# #             return 0.0, 1.0
+
+# #         norm1 = float(np.linalg.norm(v1))
+# #         norm2 = float(np.linalg.norm(v2))
+
+# #         if norm1 == 0.0 or norm2 == 0.0:
+# #             return 0.0, 1.0
+
+# #         similarity = float(
+# #             np.dot(v1, v2) /
+# #             (norm1 * norm2)
+# #         )
+
+# #         similarity = max(
+# #             -1.0,
+# #             min(1.0, similarity),
+# #         )
+
+# #         distance = max(
+# #             0.0,
+# #             1.0 - similarity,
+# #         )
+
+# #         return similarity, distance
+
+# #     # ====================================================================
+# #     # EMBEDDING COMPARISON
+# #     # ====================================================================
+
+# #     def compare_embeddings(
+# #         self,
+# #         query_embedding: List[float],
+# #         candidate_embeddings: List[List[float]],
+# #         candidate_boxes: Optional[
+# #             List[Dict[str, int]]
+# #         ] = None,
+# #     ) -> Dict[str, Any]:
+# #         """Compare query face against every candidate face."""
+
+# #         if (
+# #             not isinstance(query_embedding, list)
+# #             or not query_embedding
+# #         ):
+# #             return self._build_match_error(
+# #                 "Query embedding is missing, empty, or invalid."
+# #             )
+
+# #         if not candidate_embeddings:
+# #             return {
+# #                 "match": False,
+# #                 "status": self.STATUS_NO_MATCH,
+# #                 "similarity": None,
+# #                 "distance": None,
+# #                 "threshold": self.threshold,
+# #                 "candidate_face_count": 0,
+# #                 "encoded_candidate_face_count": 0,
+# #                 "best_candidate_face_index": None,
+# #                 "best_similarity": None,
+# #                 "best_distance": None,
+# #                 "candidate_faces": [],
+# #                 "all_face_similarities": [],
+# #                 "error": None,
+# #             }
+
+# #         candidate_faces_detail = []
+# #         all_similarities = []
+
+# #         best_similarity = -2.0
+# #         best_distance = 2.0
+# #         best_index = None
+
+# #         for index, candidate_embedding in enumerate(
+# #             candidate_embeddings
+# #         ):
+
+# #             if (
+# #                 not isinstance(
+# #                     candidate_embedding,
+# #                     list,
+# #                 )
+# #                 or not candidate_embedding
+# #             ):
+# #                 continue
+
+# #             similarity, distance = self.compute_similarity(
+# #                 query_embedding,
+# #                 candidate_embedding,
+# #             )
+
+# #             similarity_rounded = round(
+# #                 similarity,
+# #                 4,
+# #             )
+
+# #             distance_rounded = round(
+# #                 distance,
+# #                 4,
+# #             )
+
+# #             all_similarities.append(
+# #                 similarity_rounded
+# #             )
+
+# #             box = {}
+
+# #             if (
+# #                 candidate_boxes
+# #                 and index < len(candidate_boxes)
+# #             ):
+# #                 box = candidate_boxes[index] or {}
+
+# #             candidate_faces_detail.append(
+# #                 {
+# #                     "face_index": index,
+# #                     "box": box,
+# #                     "similarity": similarity_rounded,
+# #                     "distance": distance_rounded,
+# #                 }
+# #             )
+
+# #             if similarity > best_similarity:
+# #                 best_similarity = similarity
+# #                 best_distance = distance
+# #                 best_index = index
+
+# #         # Nothing could be evaluated.
+# #         if best_index is None:
+# #             return self._build_match_error(
+# #                 "Failed to evaluate candidate embeddings."
+# #             )
+
+# #         # ----------------------------------------------------------------
+# #         # HARD MATCH CONDITION
+# #         # ----------------------------------------------------------------
+
+# #         matched = (
+# #             best_index is not None
+# #             and len(candidate_embeddings) > 0
+# #             and best_similarity >= self.threshold
+# #         )
+
+# #         return {
+# #             "match": bool(matched),
+
+# #             "status": (
+# #                 self.STATUS_MATCH
+# #                 if matched
+# #                 else self.STATUS_NO_MATCH
+# #             ),
+
+# #             "similarity": round(
+# #                 best_similarity,
+# #                 4,
+# #             ),
+
+# #             "distance": round(
+# #                 best_distance,
+# #                 4,
+# #             ),
+
+# #             "threshold": self.threshold,
+
+# #             "candidate_face_count": len(
+# #                 candidate_embeddings
+# #             ),
+
+# #             "encoded_candidate_face_count": len(
+# #                 candidate_embeddings
+# #             ),
+
+# #             "best_candidate_face_index": best_index,
+
+# #             "best_similarity": round(
+# #                 best_similarity,
+# #                 4,
+# #             ),
+
+# #             "best_distance": round(
+# #                 best_distance,
+# #                 4,
+# #             ),
+
+# #             "candidate_faces": candidate_faces_detail,
+
+# #             "all_face_similarities": all_similarities,
+
+# #             "error": None,
+# #         }
+
+# #     # ====================================================================
+# #     # DOWNLOAD IMAGE
+# #     # ====================================================================
+
+# #     def download_candidate_image(
+# #         self,
+# #         url: str,
+# #     ) -> Dict[str, Any]:
+# #         """Download and validate candidate image."""
+
+# #         url_str = str(url).strip()
+
+# #         # Direct local file handling
+# #         if os.path.exists(url_str) and os.path.isfile(url_str):
+# #             img = cv2.imread(url_str)
+# #             if img is not None:
+# #                 h, w = img.shape[:2]
+# #                 with open(url_str, "rb") as f:
+# #                     data = f.read()
+# #                 return {
+# #                     "success": True,
+# #                     "temp_path": Path(url_str),
+# #                     "image_bytes": data,
+# #                     "image_size": {
+# #                         "width": w,
+# #                         "height": h,
+# #                     },
+# #                     "error": None,
+# #                 }
+
+# #         try:
+# #             parsed = urlparse(url_str)
+# #         except Exception:
+# #             parsed = None
+
+# #         if (
+# #             parsed is None
+# #             or parsed.scheme.lower()
+# #             not in {"http", "https"}
+# #             or not parsed.netloc
+# #         ):
+# #             return {
+# #                 "success": False,
+# #                 "temp_path": None,
+# #                 "image_bytes": None,
+# #                 "image_size": {
+# #                     "width": 0,
+# #                     "height": 0,
+# #                 },
+# #                 "error": (
+# #                     "Invalid candidate image URL scheme. "
+# #                     "Only HTTP/HTTPS URLs are allowed."
+# #                 ),
+# #             }
+
+# #         try:
+
+# #             headers = {
+# #                 "User-Agent": (
+# #                     "Mozilla/5.0 "
+# #                     "(Windows NT 10.0; Win64; x64) "
+# #                     "AppleWebKit/537.36 "
+# #                     "(KHTML, like Gecko) "
+# #                     "Chrome/151.0 Safari/537.36"
+# #                 )
+# #             }
+
+# #             response = requests.get(
+# #                 url_str,
+# #                 headers=headers,
+# #                 stream=True,
+# #                 timeout=self.timeout,
+# #             )
+
+# #             if response.status_code != 200:
+# #                 return {
+# #                     "success": False,
+# #                     "temp_path": None,
+# #                     "image_bytes": None,
+# #                     "image_size": {
+# #                         "width": 0,
+# #                         "height": 0,
+# #                     },
+# #                     "error": (
+# #                         "Candidate image request failed "
+# #                         f"with HTTP {response.status_code}."
+# #                     ),
+# #                 }
+
+# #             content_length = response.headers.get(
+# #                 "Content-Length"
+# #             )
+
+# #             if content_length:
+
+# #                 try:
+# #                     if (
+# #                         int(content_length)
+# #                         > self.max_download_size_bytes
+# #                     ):
+# #                         return {
+# #                             "success": False,
+# #                             "temp_path": None,
+# #                             "image_bytes": None,
+# #                             "image_size": {
+# #                                 "width": 0,
+# #                                 "height": 0,
+# #                             },
+# #                             "error": (
+# #                                 "Candidate image exceeds "
+# #                                 "maximum allowed size."
+# #                             ),
+# #                         }
+
+# #                 except ValueError:
+# #                     pass
+
+# #             downloaded = bytearray()
+
+# #             for chunk in response.iter_content(
+# #                 chunk_size=8192
+# #             ):
+
+# #                 if not chunk:
+# #                     continue
+
+# #                 downloaded.extend(chunk)
+
+# #                 if (
+# #                     len(downloaded)
+# #                     > self.max_download_size_bytes
+# #                 ):
+# #                     return {
+# #                         "success": False,
+# #                         "temp_path": None,
+# #                         "image_bytes": None,
+# #                         "image_size": {
+# #                             "width": 0,
+# #                             "height": 0,
+# #                         },
+# #                         "error": (
+# #                             "Downloaded candidate image "
+# #                             "exceeded maximum allowed size."
+# #                         ),
+# #                     }
+
+# #             image_bytes = bytes(downloaded)
+
+# #             if not image_bytes:
+# #                 return {
+# #                     "success": False,
+# #                     "temp_path": None,
+# #                     "image_bytes": None,
+# #                     "image_size": {
+# #                         "width": 0,
+# #                         "height": 0,
+# #                     },
+# #                     "error": (
+# #                         "Downloaded candidate image is empty."
+# #                     ),
+# #                 }
+
+# #             image_array = np.frombuffer(
+# #                 image_bytes,
+# #                 dtype=np.uint8,
+# #             )
+
+# #             image = cv2.imdecode(
+# #                 image_array,
+# #                 cv2.IMREAD_COLOR,
+# #             )
+
+# #             if image is None or image.size == 0:
+# #                 return {
+# #                     "success": False,
+# #                     "temp_path": None,
+# #                     "image_bytes": None,
+# #                     "image_size": {
+# #                         "width": 0,
+# #                         "height": 0,
+# #                     },
+# #                     "error": (
+# #                         "Downloaded data is not a "
+# #                         "valid decodable image."
+# #                     ),
+# #                 }
+
+# #             height, width = image.shape[:2]
+
+# #             with tempfile.NamedTemporaryFile(
+# #                 delete=False,
+# #                 suffix=".jpg",
+# #             ) as temp_file:
+
+# #                 temp_file.write(image_bytes)
+
+# #                 temp_path = Path(
+# #                     temp_file.name
+# #                 )
+
+# #             return {
+# #                 "success": True,
+# #                 "temp_path": temp_path,
+# #                 "image_bytes": image_bytes,
+# #                 "image_size": {
+# #                     "width": int(width),
+# #                     "height": int(height),
+# #                 },
+# #                 "error": None,
+# #             }
+
+# #         except requests.exceptions.Timeout:
+
+# #             return {
+# #                 "success": False,
+# #                 "temp_path": None,
+# #                 "image_bytes": None,
+# #                 "image_size": {
+# #                     "width": 0,
+# #                     "height": 0,
+# #                 },
+# #                 "error": (
+# #                     "Candidate image download timed out."
+# #                 ),
+# #             }
+
+# #         except requests.exceptions.RequestException as err:
+
+# #             return {
+# #                 "success": False,
+# #                 "temp_path": None,
+# #                 "image_bytes": None,
+# #                 "image_size": {
+# #                     "width": 0,
+# #                     "height": 0,
+# #                 },
+# #                 "error": (
+# #                     "Candidate image network error: "
+# #                     f"{err}"
+# #                 ),
+# #             }
+
+# #         except Exception as err:
+
+# #             return {
+# #                 "success": False,
+# #                 "temp_path": None,
+# #                 "image_bytes": None,
+# #                 "image_size": {
+# #                     "width": 0,
+# #                     "height": 0,
+# #                 },
+# #                 "error": (
+# #                     "Unexpected candidate image "
+# #                     f"download error: {err}"
+# #                 ),
+# #             }
+
+# #     # ====================================================================
+# #     # VERIFY CANDIDATE IMAGE
+# #     # ====================================================================
+
+# #     def verify_candidate_image(
+# #         self,
+# #         query_embedding: List[float],
+# #         image_source: Union[
+# #             str,
+# #             Path,
+# #             bytes,
+# #         ],
+# #         candidate_url: Optional[str] = None,
+# #         thumbnail_url: Optional[str] = None,
+# #     ) -> Dict[str, Any]:
+# #         """Detect and compare all faces in candidate image."""
+
+# #         temporary_path = None
+# #         target_path = None
+
+# #         image_size = {
+# #             "width": 0,
+# #             "height": 0,
+# #         }
+
+# #         # ================================================================
+# #         # BYTES
+# #         # ================================================================
+
+# #         if isinstance(
+# #             image_source,
+# #             bytes,
+# #         ):
+
+# #             image_array = np.frombuffer(
+# #                 image_source,
+# #                 dtype=np.uint8,
+# #             )
+
+# #             image = cv2.imdecode(
+# #                 image_array,
+# #                 cv2.IMREAD_COLOR,
+# #             )
+
+# #             if image is None or image.size == 0:
+# #                 return self._build_match_error(
+# #                     "Failed to decode provided candidate image bytes.",
+# #                     candidate_url,
+# #                     thumbnail_url,
+# #                 )
+
+# #             image_size = {
+# #                 "width": int(image.shape[1]),
+# #                 "height": int(image.shape[0]),
+# #             }
+
+# #             with tempfile.NamedTemporaryFile(
+# #                 delete=False,
+# #                 suffix=".jpg",
+# #             ) as temp_file:
+
+# #                 temp_file.write(image_source)
+
+# #                 target_path = Path(
+# #                     temp_file.name
+# #                 )
+
+# #                 temporary_path = target_path
+
+# #         # ================================================================
+# #         # PATH
+# #         # ================================================================
+
+# #         elif isinstance(
+# #             image_source,
+# #             Path,
+# #         ):
+
+# #             if not image_source.is_file():
+# #                 return self._build_match_error(
+# #                     (
+# #                         "Local candidate image file "
+# #                         f"not found: '{image_source}'"
+# #                     ),
+# #                     candidate_url,
+# #                     thumbnail_url,
+# #                 )
+
+# #             target_path = image_source
+
+# #             image = cv2.imread(
+# #                 str(target_path)
+# #             )
+
+# #             if image is None:
+# #                 return self._build_match_error(
+# #                     "OpenCV could not read local candidate image.",
+# #                     candidate_url,
+# #                     thumbnail_url,
+# #                 )
+
+# #             image_size = {
+# #                 "width": int(image.shape[1]),
+# #                 "height": int(image.shape[0]),
+# #             }
+
+# #         # ================================================================
+# #         # STRING
+# #         # ================================================================
+
+# #         elif isinstance(
+# #             image_source,
+# #             str,
+# #         ):
+
+# #             source = image_source.strip()
+
+# #             parsed = urlparse(source)
+
+# #             if (
+# #                 parsed.scheme.lower()
+# #                 in {"http", "https"}
+# #                 and parsed.netloc
+# #             ):
+
+# #                 download = self.download_candidate_image(
+# #                     source
+# #                 )
+
+# #                 if not download["success"]:
+# #                     return self._build_match_error(
+# #                         download["error"],
+# #                         candidate_url or source,
+# #                         thumbnail_url,
+# #                     )
+
+# #                 target_path = download["temp_path"]
+# #                 temporary_path = target_path
+# #                 image_size = download["image_size"]
+
+# #             elif parsed.scheme:
+
+# #                 return self._build_match_error(
+# #                     (
+# #                         "Invalid candidate image URL scheme. "
+# #                         "Only HTTP/HTTPS URLs are allowed."
+# #                     ),
+# #                     candidate_url or source,
+# #                     thumbnail_url,
+# #                 )
+
+# #             else:
+
+# #                 local_path = Path(source)
+
+# #                 if not local_path.is_file():
+# #                     return self._build_match_error(
+# #                         (
+# #                             "Local candidate image "
+# #                             f"file not found: '{source}'"
+# #                         ),
+# #                         candidate_url,
+# #                         thumbnail_url,
+# #                     )
+
+# #                 target_path = local_path
+
+# #                 image = cv2.imread(
+# #                     str(target_path)
+# #                 )
+
+# #                 if image is None:
+# #                     return self._build_match_error(
+# #                         "OpenCV could not read local candidate image.",
+# #                         candidate_url,
+# #                         thumbnail_url,
+# #                     )
+
+# #                 image_size = {
+# #                     "width": int(image.shape[1]),
+# #                     "height": int(image.shape[0]),
+# #                 }
+
+# #         else:
+
+# #             return self._build_match_error(
+# #                 "Unsupported candidate image source type.",
+# #                 candidate_url,
+# #                 thumbnail_url,
+# #             )
+
+# #         # ================================================================
+# #         # PROCESS
+# #         # ================================================================
+
+# #         try:
+
+# #             if target_path is None:
+# #                 return self._build_match_error(
+# #                     "Candidate image path could not be resolved.",
+# #                     candidate_url,
+# #                     thumbnail_url,
+# #                     image_size,
+# #                 )
+
+# #             # Small thumbnails need more tolerant detection.
+# #             is_small_image = (
+# #                 image_size["width"] > 0
+# #                 and (
+# #                     image_size["width"] < 250
+# #                     or image_size["height"] < 250
+# #                 )
+# #             )
+
+# #             active_detector = (
+# #                 self.small_detector
+# #                 if is_small_image
+# #                 else self.detector
+# #             )
+
+# #             active_encoder = (
+# #                 self.small_encoder
+# #                 if is_small_image
+# #                 else self.encoder
+# #             )
+
+# #             # ============================================================
+# #             # FACE DETECTION
+# #             # ============================================================
+
+# #             detection = active_detector.detect_faces(
+# #                 target_path
+# #             )
+
+# #             if not detection.get(
+# #                 "success",
+# #                 False,
+# #             ):
+# #                 return self._build_match_error(
+# #                     (
+# #                         "Candidate face detection failed: "
+# #                         f"{detection.get('error')}"
+# #                     ),
+# #                     candidate_url,
+# #                     thumbnail_url,
+# #                     image_size,
+# #                 )
+
+# #             face_count = int(
+# #                 detection.get(
+# #                     "face_count",
+# #                     0,
+# #                 )
+# #             )
+
+# #             detected_faces = detection.get(
+# #                 "faces",
+# #                 [],
+# #             )
+
+# #             # ============================================================
+# #             # NO FACE
+# #             # ============================================================
+
+# #             if face_count == 0:
+# #                 return {
+# #                     "match": False,
+# #                     "status": self.STATUS_NO_MATCH,
+# #                     "similarity": None,
+# #                     "distance": None,
+# #                     "threshold": self.threshold,
+# #                     "candidate_url": (
+# #                         candidate_url
+# #                         or str(image_source)
+# #                     ),
+# #                     "thumbnail_url": thumbnail_url,
+# #                     "candidate_image_size": image_size,
+# #                     "candidate_face_count": 0,
+# #                     "encoded_candidate_face_count": 0,
+# #                     "best_candidate_face_index": None,
+# #                     "best_similarity": None,
+# #                     "best_distance": None,
+# #                     "candidate_faces": [],
+# #                     "all_face_similarities": [],
+# #                     "error": None,
+# #                 }
+
+# #             # ============================================================
+# #             # ENCODE FACES
+# #             # ============================================================
+
+# #             candidate_embeddings = []
+# #             candidate_boxes = []
+
+# #             for face_index in range(face_count):
+
+# #                 encoding = active_encoder.encode_face(
+# #                     target_path,
+# #                     face_index=face_index,
+# #                 )
+
+# #                 if not encoding.get(
+# #                     "success",
+# #                     False,
+# #                 ):
+# #                     continue
+
+# #                 embedding = encoding.get(
+# #                     "embedding"
+# #                 )
+
+# #                 if not embedding:
+# #                     continue
+
+# #                 candidate_embeddings.append(
+# #                     embedding
+# #                 )
+
+# #                 encoded_box = encoding.get(
+# #                     "box"
+# #                 )
+
+# #                 if encoded_box:
+# #                     candidate_boxes.append(
+# #                         encoded_box
+# #                     )
+
+# #                 elif face_index < len(
+# #                     detected_faces
+# #                 ):
+# #                     candidate_boxes.append(
+# #                         detected_faces[
+# #                             face_index
+# #                         ].get(
+# #                             "box",
+# #                             {},
+# #                         )
+# #                     )
+
+# #                 else:
+# #                     candidate_boxes.append({})
+
+# #             # ============================================================
+# #             # NO ENCODINGS
+# #             # ============================================================
+
+# #             if not candidate_embeddings:
+# #                 return self._build_match_error(
+# #                     (
+# #                         "Failed to extract SFace "
+# #                         "feature embeddings from candidate face(s)."
+# #                     ),
+# #                     candidate_url,
+# #                     thumbnail_url,
+# #                     image_size,
+# #                 )
+
+# #             # ============================================================
+# #             # COMPARE
+# #             # ============================================================
+
+# #             result = self.compare_embeddings(
+# #                 query_embedding,
+# #                 candidate_embeddings,
+# #                 candidate_boxes=candidate_boxes,
+# #             )
+
+# #             result["candidate_url"] = (
+# #                 candidate_url
+# #                 or str(image_source)
+# #             )
+
+# #             result["thumbnail_url"] = thumbnail_url
+
+# #             result["candidate_image_size"] = image_size
+
+# #             # IMPORTANT:
+# #             # candidate_face_count means detected faces,
+# #             # while encoded_candidate_face_count means successfully
+# #             # encoded faces.
+# #             result["candidate_face_count"] = face_count
+
+# #             result["encoded_candidate_face_count"] = len(
+# #                 candidate_embeddings
+# #             )
+
+# #             return result
+
+# #         finally:
+
+# #             if (
+# #                 temporary_path
+# #                 and temporary_path.is_file()
+# #             ):
+
+# #                 try:
+# #                     temporary_path.unlink()
+# #                 except Exception:
+# #                     pass
+
+# #     # ====================================================================
+# #     # ERROR BUILDER
+# #     # ====================================================================
+
+# #     def _build_match_error(
+# #         self,
+# #         err_msg: str,
+# #         candidate_url: Optional[str] = None,
+# #         thumbnail_url: Optional[str] = None,
+# #         image_size: Optional[
+# #             Dict[str, int]
+# #         ] = None,
+# #     ) -> Dict[str, Any]:
+
+# #         return {
+# #             "match": False,
+# #             "status": self.STATUS_VERIFICATION_ERROR,
+# #             "similarity": None,
+# #             "distance": None,
+# #             "threshold": self.threshold,
+# #             "candidate_url": candidate_url,
+# #             "thumbnail_url": thumbnail_url,
+# #             "candidate_image_size": (
+# #                 image_size
+# #                 or {
+# #                     "width": 0,
+# #                     "height": 0,
+# #                 }
+# #             ),
+# #             "candidate_face_count": 0,
+# #             "encoded_candidate_face_count": 0,
+# #             "best_candidate_face_index": None,
+# #             "best_similarity": None,
+# #             "best_distance": None,
+# #             "candidate_faces": [],
+# #             "all_face_similarities": [],
+# #             "error": str(err_msg),
+# #         }
+
+# """Face Matcher module using OpenCV SFace.
+
+# Verifies whether an external candidate image contains a face
+# matching the query face embedding.
+
+# Optimized:
+# - Reuses decoded images.
+# - Detects faces only once per candidate image.
+# - Encodes detected faces without repeating detection.
+# - Avoids unnecessary temporary files for downloaded candidates.
+# - Keeps thumbnail fallback for technical verification errors.
+# - Does not retry thumbnails after a valid NO_MATCH.
+# """
+
+# from pathlib import Path
+# from typing import Any, Dict, List, Optional, Tuple, Union
+# import os
+# from urllib.parse import urlparse
+
+# import cv2
+# import numpy as np
+# import requests
+# from dotenv import load_dotenv
+
+# from core.face_detector import FaceDetector
+# from core.face_encoder import FaceEncoder
+
+
+# load_dotenv()
+
+
+# # ---------------------------------------------------------------------------
+# # Configuration
+# # ---------------------------------------------------------------------------
+
+# DEFAULT_SFACE_COSINE_THRESHOLD = 0.363
+
+
+# class FaceMatcher:
+#     """Verify external candidate faces using OpenCV SFace."""
+
+#     STATUS_MATCH = "MATCH"
+#     STATUS_NO_MATCH = "NO_MATCH"
+#     STATUS_VERIFICATION_ERROR = "VERIFICATION_ERROR"
+
+#     def __init__(
+#         self,
+#         threshold: Optional[float] = None,
+#         detector: Optional[FaceDetector] = None,
+#         encoder: Optional[FaceEncoder] = None,
+#         timeout: int = 10,
+#         max_download_size_bytes: int = 5 * 1024 * 1024,
+#     ) -> None:
+
+#         # --------------------------------------------------------------
+#         # THRESHOLD
+#         # --------------------------------------------------------------
+
+#         if threshold is not None:
+#             self.threshold = float(threshold)
+
+#         else:
+#             env_value = os.getenv(
+#                 "FACE_MATCH_THRESHOLD"
+#             )
+
+#             self.threshold = (
+#                 float(env_value)
+#                 if env_value
+#                 else DEFAULT_SFACE_COSINE_THRESHOLD
+#             )
+
+#         if not 0.0 <= self.threshold <= 1.0:
+#             raise ValueError(
+#                 "Face match threshold must be between 0.0 and 1.0."
+#             )
+
+#         # --------------------------------------------------------------
+#         # MODELS
+#         # --------------------------------------------------------------
+
+#         self.detector = (
+#             detector or FaceDetector()
+#         )
+
+#         # Small detector for thumbnails.
+#         self.small_detector = FaceDetector(
+#             min_size=(15, 15)
+#         )
+
+#         self.encoder = (
+#             encoder
+#             or FaceEncoder(
+#                 detector=self.detector
+#             )
+#         )
+
+#         self.small_encoder = FaceEncoder(
+#             detector=self.small_detector
+#         )
+
+#         self.timeout = timeout
+
+#         self.max_download_size_bytes = (
+#             max_download_size_bytes
+#         )
+
+#         self.session = requests.Session()
+
+#         self.session.headers.update(
+#             {
+#                 "User-Agent": (
+#                     "Mozilla/5.0 "
+#                     "(Windows NT 10.0; Win64; x64) "
+#                     "AppleWebKit/537.36 "
+#                     "(KHTML, like Gecko) "
+#                     "Chrome/151.0 Safari/537.36"
+#                 )
+#             }
+#         )
+
+#     # ====================================================================
+#     # COSINE SIMILARITY
+#     # ====================================================================
+
+#     @staticmethod
+#     def compute_similarity(
+#         embedding1: List[float],
+#         embedding2: List[float],
+#     ) -> Tuple[float, float]:
+#         """Calculate cosine similarity and cosine distance."""
+
+#         if not embedding1 or not embedding2:
+#             return 0.0, 1.0
+
+#         try:
+#             v1 = np.asarray(
+#                 embedding1,
+#                 dtype=np.float32,
+#             ).flatten()
+
+#             v2 = np.asarray(
+#                 embedding2,
+#                 dtype=np.float32,
+#             ).flatten()
+
+#         except Exception:
+#             return 0.0, 1.0
+
+#         if v1.size == 0 or v2.size == 0:
+#             return 0.0, 1.0
+
+#         if v1.size != v2.size:
+#             return 0.0, 1.0
+
+#         norm1 = float(
+#             np.linalg.norm(v1)
+#         )
+
+#         norm2 = float(
+#             np.linalg.norm(v2)
+#         )
+
+#         if norm1 == 0.0 or norm2 == 0.0:
+#             return 0.0, 1.0
+
+#         similarity = float(
+#             np.dot(v1, v2)
+#             / (norm1 * norm2)
+#         )
+
+#         similarity = max(
+#             -1.0,
+#             min(1.0, similarity),
+#         )
+
+#         distance = max(
+#             0.0,
+#             1.0 - similarity,
+#         )
+
+#         return similarity, distance
+
+#     # ====================================================================
+#     # EMBEDDING COMPARISON
+#     # ====================================================================
+
+#     def compare_embeddings(
+#         self,
+#         query_embedding: List[float],
+#         candidate_embeddings: List[List[float]],
+#         candidate_boxes: Optional[
+#             List[Dict[str, int]]
+#         ] = None,
+#     ) -> Dict[str, Any]:
+#         """Compare query face against every candidate face."""
+
+#         if (
+#             not isinstance(query_embedding, list)
+#             or not query_embedding
+#         ):
+#             return self._build_match_error(
+#                 "Query embedding is missing, empty, or invalid."
+#             )
+
+#         if not candidate_embeddings:
+#             return {
+#                 "match": False,
+#                 "status": self.STATUS_NO_MATCH,
+#                 "similarity": None,
+#                 "distance": None,
+#                 "threshold": self.threshold,
+#                 "candidate_face_count": 0,
+#                 "encoded_candidate_face_count": 0,
+#                 "best_candidate_face_index": None,
+#                 "best_similarity": None,
+#                 "best_distance": None,
+#                 "candidate_faces": [],
+#                 "all_face_similarities": [],
+#                 "error": None,
+#             }
+
+#         candidate_faces_detail = []
+#         all_similarities = []
+
+#         best_similarity = -2.0
+#         best_distance = 2.0
+#         best_index = None
+
+#         for index, candidate_embedding in enumerate(
+#             candidate_embeddings
+#         ):
+
+#             if (
+#                 not isinstance(
+#                     candidate_embedding,
+#                     list,
+#                 )
+#                 or not candidate_embedding
+#             ):
+#                 continue
+
+#             similarity, distance = (
+#                 self.compute_similarity(
+#                     query_embedding,
+#                     candidate_embedding,
+#                 )
+#             )
+
+#             similarity_rounded = round(
+#                 similarity,
+#                 4,
+#             )
+
+#             distance_rounded = round(
+#                 distance,
+#                 4,
+#             )
+
+#             all_similarities.append(
+#                 similarity_rounded
+#             )
+
+#             box = {}
+
+#             if (
+#                 candidate_boxes
+#                 and index < len(candidate_boxes)
+#             ):
+#                 box = (
+#                     candidate_boxes[index]
+#                     or {}
+#                 )
+
+#             candidate_faces_detail.append(
+#                 {
+#                     "face_index": index,
+#                     "box": box,
+#                     "similarity": similarity_rounded,
+#                     "distance": distance_rounded,
+#                 }
+#             )
+
+#             if similarity > best_similarity:
+#                 best_similarity = similarity
+#                 best_distance = distance
+#                 best_index = index
+
+#         if best_index is None:
+#             return self._build_match_error(
+#                 "Failed to evaluate candidate embeddings."
+#             )
+
+#         matched = (
+#             best_index is not None
+#             and len(candidate_embeddings) > 0
+#             and best_similarity >= self.threshold
+#         )
+
+#         return {
+#             "match": bool(matched),
+#             "status": (
+#                 self.STATUS_MATCH
+#                 if matched
+#                 else self.STATUS_NO_MATCH
+#             ),
+#             "similarity": round(
+#                 best_similarity,
+#                 4,
+#             ),
+#             "distance": round(
+#                 best_distance,
+#                 4,
+#             ),
+#             "threshold": self.threshold,
+#             "candidate_face_count": len(
+#                 candidate_embeddings
+#             ),
+#             "encoded_candidate_face_count": len(
+#                 candidate_embeddings
+#             ),
+#             "best_candidate_face_index": best_index,
+#             "best_similarity": round(
+#                 best_similarity,
+#                 4,
+#             ),
+#             "best_distance": round(
+#                 best_distance,
+#                 4,
+#             ),
+#             "candidate_faces": candidate_faces_detail,
+#             "all_face_similarities": all_similarities,
+#             "error": None,
+#         }
+
+#     # ====================================================================
+#     # DOWNLOAD
+#     # ====================================================================
+
+#     def download_candidate_image(
+#         self,
+#         url: str,
+#     ) -> Dict[str, Any]:
+#         """Download and validate a candidate image.
+
+#         Returns decoded image bytes and dimensions.
+#         No temporary file is created.
+#         """
+
+#         url_str = str(url).strip()
+
+#         # --------------------------------------------------------------
+#         # LOCAL FILE
+#         # --------------------------------------------------------------
+
+#         if (
+#             os.path.exists(url_str)
+#             and os.path.isfile(url_str)
+#         ):
+
+#             try:
+#                 image_bytes = Path(
+#                     url_str
+#                 ).read_bytes()
+
+#                 image = cv2.imdecode(
+#                     np.frombuffer(
+#                         image_bytes,
+#                         dtype=np.uint8,
+#                     ),
+#                     cv2.IMREAD_COLOR,
+#                 )
+
+#                 if image is None:
+#                     return self._download_error(
+#                         "OpenCV could not decode local image."
+#                     )
+
+#                 height, width = image.shape[:2]
+
+#                 return {
+#                     "success": True,
+#                     "temp_path": Path(url_str),
+#                     "image_bytes": image_bytes,
+#                     "image": image,
+#                     "image_size": {
+#                         "width": int(width),
+#                         "height": int(height),
+#                     },
+#                     "error": None,
+#                 }
+
+#             except Exception as err:
+#                 return self._download_error(
+#                     f"Failed to read local image: {err}"
+#                 )
+
+#         # --------------------------------------------------------------
+#         # URL VALIDATION
+#         # --------------------------------------------------------------
+
+#         try:
+#             parsed = urlparse(url_str)
+
+#         except Exception:
+#             parsed = None
+
+#         if (
+#             parsed is None
+#             or parsed.scheme.lower()
+#             not in {"http", "https"}
+#             or not parsed.netloc
+#         ):
+#             return self._download_error(
+#                 (
+#                     "Invalid candidate image URL scheme. "
+#                     "Only HTTP/HTTPS URLs are allowed."
+#                 )
+#             )
+
+#         # --------------------------------------------------------------
+#         # NETWORK DOWNLOAD
+#         # --------------------------------------------------------------
+
+#         try:
+#             response = self.session.get(
+#                 url_str,
+#                 stream=True,
+#                 timeout=self.timeout,
+#             )
+
+#             try:
+#                 if response.status_code != 200:
+#                     return self._download_error(
+#                         (
+#                             "Candidate image request failed "
+#                             f"with HTTP {response.status_code}."
+#                         )
+#                     )
+
+#                 content_length = response.headers.get(
+#                     "Content-Length"
+#                 )
+
+#                 if content_length:
+
+#                     try:
+#                         if (
+#                             int(content_length)
+#                             > self.max_download_size_bytes
+#                         ):
+#                             return self._download_error(
+#                                 (
+#                                     "Candidate image exceeds "
+#                                     "maximum allowed size."
+#                                 )
+#                             )
+
+#                     except ValueError:
+#                         pass
+
+#                 downloaded = bytearray()
+
+#                 for chunk in response.iter_content(
+#                     chunk_size=16384
+#                 ):
+
+#                     if not chunk:
+#                         continue
+
+#                     downloaded.extend(chunk)
+
+#                     if (
+#                         len(downloaded)
+#                         > self.max_download_size_bytes
+#                     ):
+#                         return self._download_error(
+#                             (
+#                                 "Downloaded candidate image "
+#                                 "exceeded maximum allowed size."
+#                             )
+#                         )
+
+#                 image_bytes = bytes(downloaded)
+
+#             finally:
+#                 response.close()
+
+#             if not image_bytes:
+#                 return self._download_error(
+#                     "Downloaded candidate image is empty."
+#                 )
+
+#             # ----------------------------------------------------------
+#             # DECODE ONCE
+#             # ----------------------------------------------------------
+
+#             image_array = np.frombuffer(
+#                 image_bytes,
+#                 dtype=np.uint8,
+#             )
+
+#             image = cv2.imdecode(
+#                 image_array,
+#                 cv2.IMREAD_COLOR,
+#             )
+
+#             if image is None or image.size == 0:
+#                 return self._download_error(
+#                     (
+#                         "Downloaded data is not a "
+#                         "valid decodable image."
+#                     )
+#                 )
+
+#             height, width = image.shape[:2]
+
+#             return {
+#                 "success": True,
+#                 "temp_path": None,
+#                 "image_bytes": image_bytes,
+#                 "image": image,
+#                 "image_size": {
+#                     "width": int(width),
+#                     "height": int(height),
+#                 },
+#                 "error": None,
+#             }
+
+#         except requests.exceptions.Timeout:
+#             return self._download_error(
+#                 "Candidate image download timed out."
+#             )
+
+#         except requests.exceptions.RequestException as err:
+#             return self._download_error(
+#                 f"Candidate image network error: {err}"
+#             )
+
+#         except Exception as err:
+#             return self._download_error(
+#                 f"Unexpected candidate image download error: {err}"
+#             )
+
+#     # ====================================================================
+#     # VERIFY CANDIDATE IMAGE
+#     # ====================================================================
+
+#     def verify_candidate_image(
+#         self,
+#         query_embedding: List[float],
+#         image_source: Union[
+#             str,
+#             Path,
+#             bytes,
+#         ],
+#         candidate_url: Optional[str] = None,
+#         thumbnail_url: Optional[str] = None,
+#     ) -> Dict[str, Any]:
+#         """Detect and compare all faces in candidate image."""
+
+#         image = None
+#         image_size = {
+#             "width": 0,
+#             "height": 0,
+#         }
+
+#         # --------------------------------------------------------------
+#         # BYTES
+#         # --------------------------------------------------------------
+
+#         if isinstance(
+#             image_source,
+#             bytes,
+#         ):
+
+#             try:
+#                 image_array = np.frombuffer(
+#                     image_source,
+#                     dtype=np.uint8,
+#                 )
+
+#                 image = cv2.imdecode(
+#                     image_array,
+#                     cv2.IMREAD_COLOR,
+#                 )
+
+#             except Exception as err:
+#                 return self._build_match_error(
+#                     f"Failed to decode candidate image bytes: {err}",
+#                     candidate_url,
+#                     thumbnail_url,
+#                 )
+
+#             if image is None or image.size == 0:
+#                 return self._build_match_error(
+#                     "Failed to decode provided candidate image bytes.",
+#                     candidate_url,
+#                     thumbnail_url,
+#                 )
+
+#         # --------------------------------------------------------------
+#         # PATH
+#         # --------------------------------------------------------------
+
+#         elif isinstance(
+#             image_source,
+#             Path,
+#         ):
+
+#             if not image_source.is_file():
+#                 return self._build_match_error(
+#                     (
+#                         "Local candidate image file "
+#                         f"not found: '{image_source}'"
+#                     ),
+#                     candidate_url,
+#                     thumbnail_url,
+#                 )
+
+#             try:
+#                 image_bytes = np.fromfile(
+#                     str(image_source),
+#                     dtype=np.uint8,
+#                 )
+
+#                 image = cv2.imdecode(
+#                     image_bytes,
+#                     cv2.IMREAD_COLOR,
+#                 )
+
+#             except Exception as err:
+#                 return self._build_match_error(
+#                     f"Failed to read local candidate image: {err}",
+#                     candidate_url,
+#                     thumbnail_url,
+#                 )
+
+#             if image is None:
+#                 return self._build_match_error(
+#                     "OpenCV could not read local candidate image.",
+#                     candidate_url,
+#                     thumbnail_url,
+#                 )
+
+#         # --------------------------------------------------------------
+#         # STRING
+#         # --------------------------------------------------------------
+
+#         elif isinstance(
+#             image_source,
+#             str,
+#         ):
+
+#             source = image_source.strip()
+
+#             parsed = urlparse(source)
+
+#             if (
+#                 parsed.scheme.lower()
+#                 in {"http", "https"}
+#                 and parsed.netloc
+#             ):
+
+#                 download = (
+#                     self.download_candidate_image(
+#                         source
+#                     )
+#                 )
+
+#                 if not download["success"]:
+#                     return self._build_match_error(
+#                         download["error"],
+#                         candidate_url or source,
+#                         thumbnail_url,
+#                     )
+
+#                 # IMPORTANT:
+#                 # Reuse the already-decoded image.
+#                 image = download["image"]
+
+#                 image_size = download[
+#                     "image_size"
+#                 ]
+
+#             elif parsed.scheme:
+
+#                 return self._build_match_error(
+#                     (
+#                         "Invalid candidate image URL scheme. "
+#                         "Only HTTP/HTTPS URLs are allowed."
+#                     ),
+#                     candidate_url or source,
+#                     thumbnail_url,
+#                 )
+
+#             else:
+
+#                 local_path = Path(source)
+
+#                 if not local_path.is_file():
+#                     return self._build_match_error(
+#                         (
+#                             "Local candidate image "
+#                             f"file not found: '{source}'"
+#                         ),
+#                         candidate_url,
+#                         thumbnail_url,
+#                     )
+
+#                 try:
+#                     image_bytes = np.fromfile(
+#                         str(local_path),
+#                         dtype=np.uint8,
+#                     )
+
+#                     image = cv2.imdecode(
+#                         image_bytes,
+#                         cv2.IMREAD_COLOR,
+#                     )
+
+#                 except Exception as err:
+#                     return self._build_match_error(
+#                         f"Failed to read local candidate image: {err}",
+#                         candidate_url,
+#                         thumbnail_url,
+#                     )
+
+#                 if image is None:
+#                     return self._build_match_error(
+#                         "OpenCV could not read local candidate image.",
+#                         candidate_url,
+#                         thumbnail_url,
+#                     )
+
+#         else:
+#             return self._build_match_error(
+#                 "Unsupported candidate image source type.",
+#                 candidate_url,
+#                 thumbnail_url,
+#             )
+
+#         # --------------------------------------------------------------
+#         # IMAGE VALIDATION
+#         # --------------------------------------------------------------
+
+#         if image is None or image.size == 0:
+#             return self._build_match_error(
+#                 "Candidate image could not be decoded.",
+#                 candidate_url,
+#                 thumbnail_url,
+#             )
+
+#         image_size = {
+#             "width": int(image.shape[1]),
+#             "height": int(image.shape[0]),
+#         }
+
+#         # --------------------------------------------------------------
+#         # SMALL IMAGE DETECTOR / ENCODER
+#         # --------------------------------------------------------------
+
+#         is_small_image = (
+#             image_size["width"] > 0
+#             and (
+#                 image_size["width"] < 250
+#                 or image_size["height"] < 250
+#             )
+#         )
+
+#         active_detector = (
+#             self.small_detector
+#             if is_small_image
+#             else self.detector
+#         )
+
+#         active_encoder = (
+#             self.small_encoder
+#             if is_small_image
+#             else self.encoder
+#         )
+
+#         # --------------------------------------------------------------
+#         # DETECT ONCE
+#         # --------------------------------------------------------------
+
+#         try:
+#             detection = (
+#                 active_detector.detect_faces_from_image(
+#                     image
+#                 )
+#             )
+
+#         except Exception as err:
+#             return self._build_match_error(
+#                 (
+#                     "Candidate face detection failed: "
+#                     f"{err}"
+#                 ),
+#                 candidate_url,
+#                 thumbnail_url,
+#                 image_size,
+#             )
+
+#         if not detection.get(
+#             "success",
+#             False,
+#         ):
+#             return self._build_match_error(
+#                 (
+#                     "Candidate face detection failed: "
+#                     f"{detection.get('error')}"
+#                 ),
+#                 candidate_url,
+#                 thumbnail_url,
+#                 image_size,
+#             )
+
+#         face_count = int(
+#             detection.get(
+#                 "face_count",
+#                 0,
+#             )
+#         )
+
+#         detected_faces = detection.get(
+#             "faces",
+#             [],
+#         )
+
+#         # --------------------------------------------------------------
+#         # NO FACE
+#         # --------------------------------------------------------------
+
+#         if face_count == 0:
+#             return {
+#                 "match": False,
+#                 "status": self.STATUS_NO_MATCH,
+#                 "similarity": None,
+#                 "distance": None,
+#                 "threshold": self.threshold,
+#                 "candidate_url": (
+#                     candidate_url
+#                     or str(image_source)
+#                 ),
+#                 "thumbnail_url": thumbnail_url,
+#                 "candidate_image_size": image_size,
+#                 "candidate_face_count": 0,
+#                 "encoded_candidate_face_count": 0,
+#                 "best_candidate_face_index": None,
+#                 "best_similarity": None,
+#                 "best_distance": None,
+#                 "candidate_faces": [],
+#                 "all_face_similarities": [],
+#                 "error": None,
+#             }
+
+#         # --------------------------------------------------------------
+#         # ENCODE ALL FACES
+#         # --------------------------------------------------------------
+
+#         candidate_embeddings: List[
+#             List[float]
+#         ] = []
+
+#         candidate_boxes: List[
+#             Dict[str, int]
+#         ] = []
+
+#         for face_index in range(
+#             face_count
+#         ):
+
+#             try:
+#                 encoding = (
+#                     active_encoder.encode_face_from_image(
+#                         image=image,
+#                         face_index=face_index,
+#                         detection=detection,
+#                     )
+#                 )
+
+#             except Exception as err:
+#                 # Skip one problematic face rather than
+#                 # killing the entire candidate.
+#                 continue
+
+#             if not encoding.get(
+#                 "success",
+#                 False,
+#             ):
+#                 continue
+
+#             embedding = encoding.get(
+#                 "embedding"
+#             )
+
+#             if not embedding:
+#                 continue
+
+#             candidate_embeddings.append(
+#                 embedding
+#             )
+
+#             encoded_box = encoding.get(
+#                 "box"
+#             )
+
+#             if encoded_box:
+#                 candidate_boxes.append(
+#                     encoded_box
+#                 )
+
+#             elif face_index < len(
+#                 detected_faces
+#             ):
+#                 candidate_boxes.append(
+#                     detected_faces[
+#                         face_index
+#                     ].get(
+#                         "box",
+#                         {},
+#                     )
+#                 )
+
+#             else:
+#                 candidate_boxes.append({})
+
+#         # --------------------------------------------------------------
+#         # NO ENCODINGS
+#         # --------------------------------------------------------------
+
+#         if not candidate_embeddings:
+#             return self._build_match_error(
+#                 (
+#                     "Failed to extract SFace "
+#                     "feature embeddings from candidate face(s)."
+#                 ),
+#                 candidate_url,
+#                 thumbnail_url,
+#                 image_size,
+#             )
+
+#         # --------------------------------------------------------------
+#         # COMPARE
+#         # --------------------------------------------------------------
+
+#         result = self.compare_embeddings(
+#             query_embedding,
+#             candidate_embeddings,
+#             candidate_boxes=candidate_boxes,
+#         )
+
+#         result["candidate_url"] = (
+#             candidate_url
+#             or str(image_source)
+#         )
+
+#         result["thumbnail_url"] = (
+#             thumbnail_url
+#         )
+
+#         result["candidate_image_size"] = (
+#             image_size
+#         )
+
+#         # Detected face count vs successfully encoded count.
+#         result["candidate_face_count"] = (
+#             face_count
+#         )
+
+#         result["encoded_candidate_face_count"] = (
+#             len(candidate_embeddings)
+#         )
+
+#         return result
+
+#     # ====================================================================
+#     # ERROR HELPERS
+#     # ====================================================================
+
+#     @staticmethod
+#     def _download_error(
+#         message: str,
+#     ) -> Dict[str, Any]:
+
+#         return {
+#             "success": False,
+#             "temp_path": None,
+#             "image_bytes": None,
+#             "image": None,
+#             "image_size": {
+#                 "width": 0,
+#                 "height": 0,
+#             },
+#             "error": str(message),
+#         }
+
+#     # ====================================================================
+#     # MATCH ERROR
+#     # ====================================================================
+
+#     def _build_match_error(
+#         self,
+#         err_msg: str,
+#         candidate_url: Optional[str] = None,
+#         thumbnail_url: Optional[str] = None,
+#         image_size: Optional[
+#             Dict[str, int]
+#         ] = None,
+#     ) -> Dict[str, Any]:
+
+#         return {
+#             "match": False,
+#             "status": self.STATUS_VERIFICATION_ERROR,
+#             "similarity": None,
+#             "distance": None,
+#             "threshold": self.threshold,
+#             "candidate_url": candidate_url,
+#             "thumbnail_url": thumbnail_url,
+#             "candidate_image_size": (
+#                 image_size
+#                 or {
+#                     "width": 0,
+#                     "height": 0,
+#                 }
+#             ),
+#             "candidate_face_count": 0,
+#             "encoded_candidate_face_count": 0,
+#             "best_candidate_face_index": None,
+#             "best_similarity": None,
+#             "best_distance": None,
+#             "candidate_faces": [],
+#             "all_face_similarities": [],
+#             "error": str(err_msg),
+#         }
+
+
+
+
+# final
+
+
+"""Face Matcher module using OpenCV SFace.
+
+Verifies whether an external candidate image contains a face
+matching the query face embedding.
+
+Optimized:
+- Reuses decoded images.
+- Detects faces only once per candidate image.
+- Encodes detected faces without repeating detection.
+- Reuses the same SFace encoder/model.
+- Avoids unnecessary temporary files.
+- Uses bounded network timeouts.
+- Keeps thumbnail fallback only for technical errors.
+- Does not retry thumbnails after a valid NO_MATCH.
 """
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import os
-import tempfile
+import time
 from urllib.parse import urlparse
 
 import cv2
@@ -35,6 +2104,10 @@ load_dotenv()
 
 DEFAULT_SFACE_COSINE_THRESHOLD = 0.363
 
+DEFAULT_TIMEOUT = 5
+
+DEFAULT_MAX_DOWNLOAD_SIZE = 5 * 1024 * 1024
+
 
 class FaceMatcher:
     """Verify external candidate faces using OpenCV SFace."""
@@ -48,19 +2121,23 @@ class FaceMatcher:
         threshold: Optional[float] = None,
         detector: Optional[FaceDetector] = None,
         encoder: Optional[FaceEncoder] = None,
-        timeout: int = 10,
-        max_download_size_bytes: int = 5 * 1024 * 1024,
+        timeout: int = DEFAULT_TIMEOUT,
+        max_download_size_bytes: int = DEFAULT_MAX_DOWNLOAD_SIZE,
     ) -> None:
 
-        # ================================================================
+        # --------------------------------------------------------------
         # THRESHOLD
-        # ================================================================
+        # --------------------------------------------------------------
 
         if threshold is not None:
+
             self.threshold = float(threshold)
 
         else:
-            env_value = os.getenv("FACE_MATCH_THRESHOLD")
+
+            env_value = os.getenv(
+                "FACE_MATCH_THRESHOLD"
+            )
 
             self.threshold = (
                 float(env_value)
@@ -69,33 +2146,66 @@ class FaceMatcher:
             )
 
         if not 0.0 <= self.threshold <= 1.0:
+
             raise ValueError(
                 "Face match threshold must be between 0.0 and 1.0."
             )
 
-        # ================================================================
+        # --------------------------------------------------------------
         # MODELS
-        # ================================================================
+        # --------------------------------------------------------------
 
-        self.detector = detector or FaceDetector()
+        self.detector = (
+            detector
+            or FaceDetector()
+        )
 
-        # More tolerant detector for small thumbnails.
+        # Small-image detector.
+        #
+        # IMPORTANT:
+        # We use a different detector for small images,
+        # but we DO NOT create another SFace model.
         self.small_detector = FaceDetector(
             min_size=(15, 15)
         )
 
-        self.encoder = encoder or FaceEncoder(
-            detector=self.detector
+        # Reuse the supplied encoder when available.
+        self.encoder = (
+            encoder
+            or FaceEncoder(
+                detector=self.detector
+            )
         )
 
-        self.small_encoder = FaceEncoder(
-            detector=self.small_detector
-        )
+        # IMPORTANT PERFORMANCE FIX:
+        # Do NOT load another SFace model.
+        #
+        # Both normal and small-image candidates use
+        # the same SFace encoder/model.
+        self.small_encoder = self.encoder
 
-        self.timeout = timeout
+        # --------------------------------------------------------------
+        # NETWORK CONFIGURATION
+        # --------------------------------------------------------------
 
-        self.max_download_size_bytes = (
+        self.timeout = int(timeout)
+
+        self.max_download_size_bytes = int(
             max_download_size_bytes
+        )
+
+        self.session = requests.Session()
+
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/151.0 Safari/537.36"
+                )
+            }
         )
 
     # ====================================================================
@@ -107,17 +2217,15 @@ class FaceMatcher:
         embedding1: List[float],
         embedding2: List[float],
     ) -> Tuple[float, float]:
-        """
-        Calculate cosine similarity and cosine distance.
 
-        Returns:
-            similarity, distance
-        """
+        """Calculate cosine similarity and cosine distance."""
 
         if not embedding1 or not embedding2:
+
             return 0.0, 1.0
 
         try:
+
             v1 = np.asarray(
                 embedding1,
                 dtype=np.float32,
@@ -129,23 +2237,32 @@ class FaceMatcher:
             ).flatten()
 
         except Exception:
+
             return 0.0, 1.0
 
         if v1.size == 0 or v2.size == 0:
+
             return 0.0, 1.0
 
         if v1.size != v2.size:
+
             return 0.0, 1.0
 
-        norm1 = float(np.linalg.norm(v1))
-        norm2 = float(np.linalg.norm(v2))
+        norm1 = float(
+            np.linalg.norm(v1)
+        )
+
+        norm2 = float(
+            np.linalg.norm(v2)
+        )
 
         if norm1 == 0.0 or norm2 == 0.0:
+
             return 0.0, 1.0
 
         similarity = float(
-            np.dot(v1, v2) /
-            (norm1 * norm2)
+            np.dot(v1, v2)
+            / (norm1 * norm2)
         )
 
         similarity = max(
@@ -172,17 +2289,23 @@ class FaceMatcher:
             List[Dict[str, int]]
         ] = None,
     ) -> Dict[str, Any]:
+
         """Compare query face against every candidate face."""
 
         if (
-            not isinstance(query_embedding, list)
+            not isinstance(
+                query_embedding,
+                list,
+            )
             or not query_embedding
         ):
+
             return self._build_match_error(
                 "Query embedding is missing, empty, or invalid."
             )
 
         if not candidate_embeddings:
+
             return {
                 "match": False,
                 "status": self.STATUS_NO_MATCH,
@@ -200,6 +2323,7 @@ class FaceMatcher:
             }
 
         candidate_faces_detail = []
+
         all_similarities = []
 
         best_similarity = -2.0
@@ -219,9 +2343,11 @@ class FaceMatcher:
             ):
                 continue
 
-            similarity, distance = self.compute_similarity(
-                query_embedding,
-                candidate_embedding,
+            similarity, distance = (
+                self.compute_similarity(
+                    query_embedding,
+                    candidate_embedding,
+                )
             )
 
             similarity_rounded = round(
@@ -244,7 +2370,11 @@ class FaceMatcher:
                 candidate_boxes
                 and index < len(candidate_boxes)
             ):
-                box = candidate_boxes[index] or {}
+
+                box = (
+                    candidate_boxes[index]
+                    or {}
+                )
 
             candidate_faces_detail.append(
                 {
@@ -256,24 +2386,21 @@ class FaceMatcher:
             )
 
             if similarity > best_similarity:
+
                 best_similarity = similarity
+
                 best_distance = distance
+
                 best_index = index
 
-        # Nothing could be evaluated.
         if best_index is None:
+
             return self._build_match_error(
                 "Failed to evaluate candidate embeddings."
             )
 
-        # ----------------------------------------------------------------
-        # HARD MATCH CONDITION
-        # ----------------------------------------------------------------
-
         matched = (
-            best_index is not None
-            and len(candidate_embeddings) > 0
-            and best_similarity >= self.threshold
+            best_similarity >= self.threshold
         )
 
         return {
@@ -325,38 +2452,92 @@ class FaceMatcher:
         }
 
     # ====================================================================
-    # DOWNLOAD IMAGE
+    # DOWNLOAD
     # ====================================================================
 
     def download_candidate_image(
         self,
         url: str,
     ) -> Dict[str, Any]:
-        """Download and validate candidate image."""
+
+        """Download and validate a candidate image."""
 
         url_str = str(url).strip()
 
-        # Direct local file handling
-        if os.path.exists(url_str) and os.path.isfile(url_str):
-            img = cv2.imread(url_str)
-            if img is not None:
-                h, w = img.shape[:2]
-                with open(url_str, "rb") as f:
-                    data = f.read()
+        print(
+            f"[MATCHER] Downloading candidate image..."
+        )
+
+        # --------------------------------------------------------------
+        # LOCAL FILE
+        # --------------------------------------------------------------
+
+        if (
+            os.path.exists(url_str)
+            and os.path.isfile(url_str)
+        ):
+
+            try:
+
+                image_bytes = Path(
+                    url_str
+                ).read_bytes()
+
+                if (
+                    len(image_bytes)
+                    > self.max_download_size_bytes
+                ):
+
+                    return self._download_error(
+                        "Local image exceeds maximum allowed size."
+                    )
+
+                image = cv2.imdecode(
+                    np.frombuffer(
+                        image_bytes,
+                        dtype=np.uint8,
+                    ),
+                    cv2.IMREAD_COLOR,
+                )
+
+                if image is None:
+
+                    return self._download_error(
+                        "OpenCV could not decode local image."
+                    )
+
+                height, width = image.shape[:2]
+
                 return {
                     "success": True,
                     "temp_path": Path(url_str),
-                    "image_bytes": data,
+                    "image_bytes": image_bytes,
+                    "image": image,
                     "image_size": {
-                        "width": w,
-                        "height": h,
+                        "width": int(width),
+                        "height": int(height),
                     },
                     "error": None,
                 }
 
+            except Exception as err:
+
+                return self._download_error(
+                    f"Failed to read local image: {err}"
+                )
+
+        # --------------------------------------------------------------
+        # URL VALIDATION
+        # --------------------------------------------------------------
+
         try:
-            parsed = urlparse(url_str)
+
+            parsed = urlparse(
+                url_str
+            )
+
         except Exception:
+
             parsed = None
 
         if (
@@ -365,126 +2546,110 @@ class FaceMatcher:
             not in {"http", "https"}
             or not parsed.netloc
         ):
-            return {
-                "success": False,
-                "temp_path": None,
-                "image_bytes": None,
-                "image_size": {
-                    "width": 0,
-                    "height": 0,
-                },
-                "error": (
+
+            return self._download_error(
+                (
                     "Invalid candidate image URL scheme. "
                     "Only HTTP/HTTPS URLs are allowed."
-                ),
-            }
+                )
+            )
+
+        # --------------------------------------------------------------
+        # NETWORK DOWNLOAD
+        # --------------------------------------------------------------
+
+        started = time.perf_counter()
 
         try:
 
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 "
-                    "(Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) "
-                    "Chrome/151.0 Safari/537.36"
-                )
-            }
-
-            response = requests.get(
+            response = self.session.get(
                 url_str,
-                headers=headers,
                 stream=True,
-                timeout=self.timeout,
+
+                # Separate connection and read limits.
+                timeout=(
+                    3,
+                    self.timeout,
+                ),
             )
 
-            if response.status_code != 200:
-                return {
-                    "success": False,
-                    "temp_path": None,
-                    "image_bytes": None,
-                    "image_size": {
-                        "width": 0,
-                        "height": 0,
-                    },
-                    "error": (
-                        "Candidate image request failed "
-                        f"with HTTP {response.status_code}."
-                    ),
-                }
+            try:
 
-            content_length = response.headers.get(
-                "Content-Length"
-            )
+                if response.status_code != 200:
 
-            if content_length:
+                    return self._download_error(
+                        (
+                            "Candidate image request failed "
+                            f"with HTTP {response.status_code}."
+                        )
+                    )
 
-                try:
+                content_length = response.headers.get(
+                    "Content-Length"
+                )
+
+                if content_length:
+
+                    try:
+
+                        if (
+                            int(content_length)
+                            > self.max_download_size_bytes
+                        ):
+
+                            return self._download_error(
+                                (
+                                    "Candidate image exceeds "
+                                    "maximum allowed size."
+                                )
+                            )
+
+                    except ValueError:
+
+                        pass
+
+                downloaded = bytearray()
+
+                for chunk in response.iter_content(
+                    chunk_size=16384
+                ):
+
+                    if not chunk:
+                        continue
+
+                    downloaded.extend(
+                        chunk
+                    )
+
                     if (
-                        int(content_length)
+                        len(downloaded)
                         > self.max_download_size_bytes
                     ):
-                        return {
-                            "success": False,
-                            "temp_path": None,
-                            "image_bytes": None,
-                            "image_size": {
-                                "width": 0,
-                                "height": 0,
-                            },
-                            "error": (
-                                "Candidate image exceeds "
-                                "maximum allowed size."
-                            ),
-                        }
 
-                except ValueError:
-                    pass
+                        return self._download_error(
+                            (
+                                "Downloaded candidate image "
+                                "exceeded maximum allowed size."
+                            )
+                        )
 
-            downloaded = bytearray()
+                image_bytes = bytes(
+                    downloaded
+                )
 
-            for chunk in response.iter_content(
-                chunk_size=8192
-            ):
+            finally:
 
-                if not chunk:
-                    continue
-
-                downloaded.extend(chunk)
-
-                if (
-                    len(downloaded)
-                    > self.max_download_size_bytes
-                ):
-                    return {
-                        "success": False,
-                        "temp_path": None,
-                        "image_bytes": None,
-                        "image_size": {
-                            "width": 0,
-                            "height": 0,
-                        },
-                        "error": (
-                            "Downloaded candidate image "
-                            "exceeded maximum allowed size."
-                        ),
-                    }
-
-            image_bytes = bytes(downloaded)
+                response.close()
 
             if not image_bytes:
-                return {
-                    "success": False,
-                    "temp_path": None,
-                    "image_bytes": None,
-                    "image_size": {
-                        "width": 0,
-                        "height": 0,
-                    },
-                    "error": (
-                        "Downloaded candidate image is empty."
-                    ),
-                }
+
+                return self._download_error(
+                    "Downloaded candidate image is empty."
+                )
+
+            # ----------------------------------------------------------
+            # DECODE ONCE
+            # ----------------------------------------------------------
 
             image_array = np.frombuffer(
                 image_bytes,
@@ -496,38 +2661,35 @@ class FaceMatcher:
                 cv2.IMREAD_COLOR,
             )
 
-            if image is None or image.size == 0:
-                return {
-                    "success": False,
-                    "temp_path": None,
-                    "image_bytes": None,
-                    "image_size": {
-                        "width": 0,
-                        "height": 0,
-                    },
-                    "error": (
+            if (
+                image is None
+                or image.size == 0
+            ):
+
+                return self._download_error(
+                    (
                         "Downloaded data is not a "
                         "valid decodable image."
-                    ),
-                }
+                    )
+                )
 
             height, width = image.shape[:2]
 
-            with tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=".jpg",
-            ) as temp_file:
+            elapsed = (
+                time.perf_counter()
+                - started
+            )
 
-                temp_file.write(image_bytes)
-
-                temp_path = Path(
-                    temp_file.name
-                )
+            print(
+                f"[MATCHER] Download complete "
+                f"({elapsed:.2f}s)"
+            )
 
             return {
                 "success": True,
-                "temp_path": temp_path,
+                "temp_path": None,
                 "image_bytes": image_bytes,
+                "image": image,
                 "image_size": {
                     "width": int(width),
                     "height": int(height),
@@ -537,50 +2699,31 @@ class FaceMatcher:
 
         except requests.exceptions.Timeout:
 
-            return {
-                "success": False,
-                "temp_path": None,
-                "image_bytes": None,
-                "image_size": {
-                    "width": 0,
-                    "height": 0,
-                },
-                "error": (
-                    "Candidate image download timed out."
-                ),
-            }
+            print(
+                "[MATCHER] Download timed out."
+            )
+
+            return self._download_error(
+                (
+                    "Candidate image download timed out "
+                    f"after approximately {self.timeout}s."
+                )
+            )
 
         except requests.exceptions.RequestException as err:
 
-            return {
-                "success": False,
-                "temp_path": None,
-                "image_bytes": None,
-                "image_size": {
-                    "width": 0,
-                    "height": 0,
-                },
-                "error": (
-                    "Candidate image network error: "
-                    f"{err}"
-                ),
-            }
+            return self._download_error(
+                f"Candidate image network error: {err}"
+            )
 
         except Exception as err:
 
-            return {
-                "success": False,
-                "temp_path": None,
-                "image_bytes": None,
-                "image_size": {
-                    "width": 0,
-                    "height": 0,
-                },
-                "error": (
+            return self._download_error(
+                (
                     "Unexpected candidate image "
                     f"download error: {err}"
-                ),
-            }
+                )
+            )
 
     # ====================================================================
     # VERIFY CANDIDATE IMAGE
@@ -597,63 +2740,77 @@ class FaceMatcher:
         candidate_url: Optional[str] = None,
         thumbnail_url: Optional[str] = None,
     ) -> Dict[str, Any]:
+
         """Detect and compare all faces in candidate image."""
 
-        temporary_path = None
-        target_path = None
+        started = time.perf_counter()
+
+        print(
+            "\n[MATCHER] --------------------------------"
+        )
+
+        print(
+            "[MATCHER] Starting candidate verification"
+        )
+
+        print(
+            f"[MATCHER] Candidate: "
+            f"{candidate_url or image_source}"
+        )
+
+        image = None
 
         image_size = {
             "width": 0,
             "height": 0,
         }
 
-        # ================================================================
+        # --------------------------------------------------------------
         # BYTES
-        # ================================================================
+        # --------------------------------------------------------------
 
         if isinstance(
             image_source,
             bytes,
         ):
 
-            image_array = np.frombuffer(
-                image_source,
-                dtype=np.uint8,
-            )
+            try:
 
-            image = cv2.imdecode(
-                image_array,
-                cv2.IMREAD_COLOR,
-            )
+                image_array = np.frombuffer(
+                    image_source,
+                    dtype=np.uint8,
+                )
 
-            if image is None or image.size == 0:
+                image = cv2.imdecode(
+                    image_array,
+                    cv2.IMREAD_COLOR,
+                )
+
+            except Exception as err:
+
+                return self._build_match_error(
+                    (
+                        "Failed to decode candidate "
+                        f"image bytes: {err}"
+                    ),
+                    candidate_url,
+                    thumbnail_url,
+                )
+
+            if (
+                image is None
+                or image.size == 0
+            ):
+
                 return self._build_match_error(
                     "Failed to decode provided candidate image bytes.",
                     candidate_url,
                     thumbnail_url,
                 )
 
-            image_size = {
-                "width": int(image.shape[1]),
-                "height": int(image.shape[0]),
-            }
-
-            with tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=".jpg",
-            ) as temp_file:
-
-                temp_file.write(image_source)
-
-                target_path = Path(
-                    temp_file.name
-                )
-
-                temporary_path = target_path
-
-        # ================================================================
+        # --------------------------------------------------------------
         # PATH
-        # ================================================================
+        # --------------------------------------------------------------
 
         elif isinstance(
             image_source,
@@ -661,6 +2818,7 @@ class FaceMatcher:
         ):
 
             if not image_source.is_file():
+
                 return self._build_match_error(
                     (
                         "Local candidate image file "
@@ -670,27 +2828,40 @@ class FaceMatcher:
                     thumbnail_url,
                 )
 
-            target_path = image_source
+            try:
 
-            image = cv2.imread(
-                str(target_path)
-            )
+                image_bytes = np.fromfile(
+                    str(image_source),
+                    dtype=np.uint8,
+                )
+
+                image = cv2.imdecode(
+                    image_bytes,
+                    cv2.IMREAD_COLOR,
+                )
+
+            except Exception as err:
+
+                return self._build_match_error(
+                    (
+                        "Failed to read local candidate "
+                        f"image: {err}"
+                    ),
+                    candidate_url,
+                    thumbnail_url,
+                )
 
             if image is None:
+
                 return self._build_match_error(
                     "OpenCV could not read local candidate image.",
                     candidate_url,
                     thumbnail_url,
                 )
 
-            image_size = {
-                "width": int(image.shape[1]),
-                "height": int(image.shape[0]),
-            }
-
-        # ================================================================
+        # --------------------------------------------------------------
         # STRING
-        # ================================================================
+        # --------------------------------------------------------------
 
         elif isinstance(
             image_source,
@@ -699,7 +2870,9 @@ class FaceMatcher:
 
             source = image_source.strip()
 
-            parsed = urlparse(source)
+            parsed = urlparse(
+                source
+            )
 
             if (
                 parsed.scheme.lower()
@@ -707,20 +2880,25 @@ class FaceMatcher:
                 and parsed.netloc
             ):
 
-                download = self.download_candidate_image(
-                    source
+                download = (
+                    self.download_candidate_image(
+                        source
+                    )
                 )
 
                 if not download["success"]:
+
                     return self._build_match_error(
                         download["error"],
                         candidate_url or source,
                         thumbnail_url,
                     )
 
-                target_path = download["temp_path"]
-                temporary_path = target_path
-                image_size = download["image_size"]
+                image = download["image"]
+
+                image_size = download[
+                    "image_size"
+                ]
 
             elif parsed.scheme:
 
@@ -735,9 +2913,12 @@ class FaceMatcher:
 
             else:
 
-                local_path = Path(source)
+                local_path = Path(
+                    source
+                )
 
                 if not local_path.is_file():
+
                     return self._build_match_error(
                         (
                             "Local candidate image "
@@ -747,23 +2928,36 @@ class FaceMatcher:
                         thumbnail_url,
                     )
 
-                target_path = local_path
+                try:
 
-                image = cv2.imread(
-                    str(target_path)
-                )
+                    image_bytes = np.fromfile(
+                        str(local_path),
+                        dtype=np.uint8,
+                    )
+
+                    image = cv2.imdecode(
+                        image_bytes,
+                        cv2.IMREAD_COLOR,
+                    )
+
+                except Exception as err:
+
+                    return self._build_match_error(
+                        (
+                            "Failed to read local "
+                            f"candidate image: {err}"
+                        ),
+                        candidate_url,
+                        thumbnail_url,
+                    )
 
                 if image is None:
+
                     return self._build_match_error(
                         "OpenCV could not read local candidate image.",
                         candidate_url,
                         thumbnail_url,
                     )
-
-                image_size = {
-                    "width": int(image.shape[1]),
-                    "height": int(image.shape[0]),
-                }
 
         else:
 
@@ -773,217 +2967,346 @@ class FaceMatcher:
                 thumbnail_url,
             )
 
-        # ================================================================
-        # PROCESS
-        # ================================================================
+        # --------------------------------------------------------------
+        # IMAGE VALIDATION
+        # --------------------------------------------------------------
+
+        if (
+            image is None
+            or image.size == 0
+        ):
+
+            return self._build_match_error(
+                "Candidate image could not be decoded.",
+                candidate_url,
+                thumbnail_url,
+            )
+
+        image_size = {
+            "width": int(
+                image.shape[1]
+            ),
+            "height": int(
+                image.shape[0]
+            ),
+        }
+
+        # --------------------------------------------------------------
+        # SELECT DETECTOR
+        # --------------------------------------------------------------
+
+        is_small_image = (
+            image_size["width"] > 0
+            and (
+                image_size["width"] < 250
+                or image_size["height"] < 250
+            )
+        )
+
+        active_detector = (
+            self.small_detector
+            if is_small_image
+            else self.detector
+        )
+
+        # IMPORTANT:
+        # Same SFace model regardless of image size.
+        active_encoder = self.encoder
+
+        # --------------------------------------------------------------
+        # DETECT ONCE
+        # --------------------------------------------------------------
+
+        print(
+            "[MATCHER] Running face detection..."
+        )
+
+        detection_started = time.perf_counter()
 
         try:
 
-            if target_path is None:
-                return self._build_match_error(
-                    "Candidate image path could not be resolved.",
-                    candidate_url,
-                    thumbnail_url,
-                    image_size,
-                )
-
-            # Small thumbnails need more tolerant detection.
-            is_small_image = (
-                image_size["width"] > 0
-                and (
-                    image_size["width"] < 250
-                    or image_size["height"] < 250
+            detection = (
+                active_detector.detect_faces_from_image(
+                    image
                 )
             )
 
-            active_detector = (
-                self.small_detector
-                if is_small_image
-                else self.detector
+        except Exception as err:
+
+            return self._build_match_error(
+                (
+                    "Candidate face detection failed: "
+                    f"{err}"
+                ),
+                candidate_url,
+                thumbnail_url,
+                image_size,
             )
 
-            active_encoder = (
-                self.small_encoder
-                if is_small_image
-                else self.encoder
+        detection_time = (
+            time.perf_counter()
+            - detection_started
+        )
+
+        if not detection.get(
+            "success",
+            False,
+        ):
+
+            return self._build_match_error(
+                (
+                    "Candidate face detection failed: "
+                    f"{detection.get('error')}"
+                ),
+                candidate_url,
+                thumbnail_url,
+                image_size,
             )
 
-            # ============================================================
-            # FACE DETECTION
-            # ============================================================
+        face_count = int(
+            detection.get(
+                "face_count",
+                0,
+            )
+        )
 
-            detection = active_detector.detect_faces(
-                target_path
+        detected_faces = detection.get(
+            "faces",
+            [],
+        )
+
+        print(
+            f"[MATCHER] Face detection complete: "
+            f"{face_count} face(s) "
+            f"({detection_time:.2f}s)"
+        )
+
+        # --------------------------------------------------------------
+        # NO FACE
+        # --------------------------------------------------------------
+
+        if face_count == 0:
+
+            print(
+                "[MATCHER] No face found."
             )
 
-            if not detection.get(
+            return {
+                "match": False,
+                "status": self.STATUS_NO_MATCH,
+                "similarity": None,
+                "distance": None,
+                "threshold": self.threshold,
+                "candidate_url": (
+                    candidate_url
+                    or str(image_source)
+                ),
+                "thumbnail_url": thumbnail_url,
+                "candidate_image_size": image_size,
+                "candidate_face_count": 0,
+                "encoded_candidate_face_count": 0,
+                "best_candidate_face_index": None,
+                "best_similarity": None,
+                "best_distance": None,
+                "candidate_faces": [],
+                "all_face_similarities": [],
+                "error": None,
+            }
+
+        # --------------------------------------------------------------
+        # ENCODE ALL FACES
+        # --------------------------------------------------------------
+
+        print(
+            f"[MATCHER] Encoding {face_count} face(s) with SFace..."
+        )
+
+        encoding_started = time.perf_counter()
+
+        candidate_embeddings: List[
+            List[float]
+        ] = []
+
+        candidate_boxes: List[
+            Dict[str, int]
+        ] = []
+
+        for face_index in range(
+            face_count
+        ):
+
+            try:
+
+                encoding = (
+                    active_encoder.encode_face_from_image(
+                        image=image,
+                        face_index=face_index,
+                        detection=detection,
+                    )
+                )
+
+            except Exception as err:
+
+                print(
+                    f"[MATCHER] Face {face_index} "
+                    f"encoding failed: {err}"
+                )
+
+                continue
+
+            if not encoding.get(
                 "success",
                 False,
             ):
-                return self._build_match_error(
-                    (
-                        "Candidate face detection failed: "
-                        f"{detection.get('error')}"
-                    ),
-                    candidate_url,
-                    thumbnail_url,
-                    image_size,
-                )
 
-            face_count = int(
-                detection.get(
-                    "face_count",
-                    0,
-                )
+                continue
+
+            embedding = encoding.get(
+                "embedding"
             )
 
-            detected_faces = detection.get(
-                "faces",
-                [],
+            if not embedding:
+
+                continue
+
+            candidate_embeddings.append(
+                embedding
             )
 
-            # ============================================================
-            # NO FACE
-            # ============================================================
-
-            if face_count == 0:
-                return {
-                    "match": False,
-                    "status": self.STATUS_NO_MATCH,
-                    "similarity": None,
-                    "distance": None,
-                    "threshold": self.threshold,
-                    "candidate_url": (
-                        candidate_url
-                        or str(image_source)
-                    ),
-                    "thumbnail_url": thumbnail_url,
-                    "candidate_image_size": image_size,
-                    "candidate_face_count": 0,
-                    "encoded_candidate_face_count": 0,
-                    "best_candidate_face_index": None,
-                    "best_similarity": None,
-                    "best_distance": None,
-                    "candidate_faces": [],
-                    "all_face_similarities": [],
-                    "error": None,
-                }
-
-            # ============================================================
-            # ENCODE FACES
-            # ============================================================
-
-            candidate_embeddings = []
-            candidate_boxes = []
-
-            for face_index in range(face_count):
-
-                encoding = active_encoder.encode_face(
-                    target_path,
-                    face_index=face_index,
-                )
-
-                if not encoding.get(
-                    "success",
-                    False,
-                ):
-                    continue
-
-                embedding = encoding.get(
-                    "embedding"
-                )
-
-                if not embedding:
-                    continue
-
-                candidate_embeddings.append(
-                    embedding
-                )
-
-                encoded_box = encoding.get(
-                    "box"
-                )
-
-                if encoded_box:
-                    candidate_boxes.append(
-                        encoded_box
-                    )
-
-                elif face_index < len(
-                    detected_faces
-                ):
-                    candidate_boxes.append(
-                        detected_faces[
-                            face_index
-                        ].get(
-                            "box",
-                            {},
-                        )
-                    )
-
-                else:
-                    candidate_boxes.append({})
-
-            # ============================================================
-            # NO ENCODINGS
-            # ============================================================
-
-            if not candidate_embeddings:
-                return self._build_match_error(
-                    (
-                        "Failed to extract SFace "
-                        "feature embeddings from candidate face(s)."
-                    ),
-                    candidate_url,
-                    thumbnail_url,
-                    image_size,
-                )
-
-            # ============================================================
-            # COMPARE
-            # ============================================================
-
-            result = self.compare_embeddings(
-                query_embedding,
-                candidate_embeddings,
-                candidate_boxes=candidate_boxes,
+            encoded_box = encoding.get(
+                "box"
             )
 
-            result["candidate_url"] = (
-                candidate_url
-                or str(image_source)
-            )
+            if encoded_box:
 
-            result["thumbnail_url"] = thumbnail_url
+                candidate_boxes.append(
+                    encoded_box
+                )
 
-            result["candidate_image_size"] = image_size
-
-            # IMPORTANT:
-            # candidate_face_count means detected faces,
-            # while encoded_candidate_face_count means successfully
-            # encoded faces.
-            result["candidate_face_count"] = face_count
-
-            result["encoded_candidate_face_count"] = len(
-                candidate_embeddings
-            )
-
-            return result
-
-        finally:
-
-            if (
-                temporary_path
-                and temporary_path.is_file()
+            elif face_index < len(
+                detected_faces
             ):
 
-                try:
-                    temporary_path.unlink()
-                except Exception:
-                    pass
+                candidate_boxes.append(
+                    detected_faces[
+                        face_index
+                    ].get(
+                        "box",
+                        {},
+                    )
+                )
+
+            else:
+
+                candidate_boxes.append({})
+
+        encoding_time = (
+            time.perf_counter()
+            - encoding_started
+        )
+
+        print(
+            f"[MATCHER] SFace encoding complete: "
+            f"{len(candidate_embeddings)} face(s) "
+            f"({encoding_time:.2f}s)"
+        )
+
+        # --------------------------------------------------------------
+        # NO ENCODINGS
+        # --------------------------------------------------------------
+
+        if not candidate_embeddings:
+
+            return self._build_match_error(
+                (
+                    "Failed to extract SFace "
+                    "feature embeddings from candidate face(s)."
+                ),
+                candidate_url,
+                thumbnail_url,
+                image_size,
+            )
+
+        # --------------------------------------------------------------
+        # COMPARE
+        # --------------------------------------------------------------
+
+        result = self.compare_embeddings(
+            query_embedding,
+            candidate_embeddings,
+            candidate_boxes=candidate_boxes,
+        )
+
+        result["candidate_url"] = (
+            candidate_url
+            or str(image_source)
+        )
+
+        result["thumbnail_url"] = (
+            thumbnail_url
+        )
+
+        result["candidate_image_size"] = (
+            image_size
+        )
+
+        result["candidate_face_count"] = (
+            face_count
+        )
+
+        result["encoded_candidate_face_count"] = (
+            len(candidate_embeddings)
+        )
+
+        elapsed = (
+            time.perf_counter()
+            - started
+        )
+
+        print(
+            f"[MATCHER] Similarity: "
+            f"{result.get('similarity')}"
+        )
+
+        print(
+            f"[MATCHER] Status: "
+            f"{result.get('status')}"
+        )
+
+        print(
+            f"[MATCHER] Total candidate time: "
+            f"{elapsed:.2f}s"
+        )
+
+        print(
+            "[MATCHER] --------------------------------"
+        )
+
+        return result
 
     # ====================================================================
-    # ERROR BUILDER
+    # ERROR HELPERS
+    # ====================================================================
+
+    @staticmethod
+    def _download_error(
+        message: str,
+    ) -> Dict[str, Any]:
+
+        return {
+            "success": False,
+            "temp_path": None,
+            "image_bytes": None,
+            "image": None,
+            "image_size": {
+                "width": 0,
+                "height": 0,
+            },
+            "error": str(message),
+        }
+
+    # ====================================================================
+    # MATCH ERROR
     # ====================================================================
 
     def _build_match_error(
@@ -998,12 +3321,19 @@ class FaceMatcher:
 
         return {
             "match": False,
+
             "status": self.STATUS_VERIFICATION_ERROR,
+
             "similarity": None,
+
             "distance": None,
+
             "threshold": self.threshold,
+
             "candidate_url": candidate_url,
+
             "thumbnail_url": thumbnail_url,
+
             "candidate_image_size": (
                 image_size
                 or {
@@ -1011,12 +3341,20 @@ class FaceMatcher:
                     "height": 0,
                 }
             ),
+
             "candidate_face_count": 0,
+
             "encoded_candidate_face_count": 0,
+
             "best_candidate_face_index": None,
+
             "best_similarity": None,
+
             "best_distance": None,
+
             "candidate_faces": [],
+
             "all_face_similarities": [],
+
             "error": str(err_msg),
         }
